@@ -1,0 +1,1861 @@
+---
+title: "EMSBD 6  - Apprentissage non-supervisé"
+subtitle: "Paris et sa sphère d\\'influence"
+lang: fr
+author: "Bruno KUBECZKA"
+date: "31 Mars 2024"
+date-format: "D MMMM YYYY"
+abstract: "Ce document a pour objet l'étude de l'évolution de la population à Paris et dans ses 3 couronnes de départements de 1780 à 2022.\\newpage"
+format:
+  html:
+    toc: true
+    toc-title: Sommaire
+    toc-depth: 4
+  pdf:
+    toc: true
+    toc-title: Sommaire
+    toc-depth: 4
+    highlight-style: tango
+    number-sections: true
+    number-depth: 4
+execute: 
+  cache: true
+  warning: false
+editor: visual
+---
+
+\newpage
+
+```{r}
+#| label: packages
+#| warning: false
+#| include: false
+
+if (!"geodata" %in% installed.packages()) install.packages("geodata")
+if (!"colorspace" %in% installed.packages()) install.packages("colorspace")
+if (!"raster" %in% installed.packages()) install.packages("raster")
+if (!"GGally" %in% installed.packages()) install.packages("GGally")
+if (!"dendextend" %in% installed.packages()) install.packages("dendextend")
+if (!"FactoMineR" %in% installed.packages()) install.packages("FactoMineR")
+if (!"factoextra" %in% installed.packages()) install.packages("factoextra")
+if (!"changepoint" %in% installed.packages()) install.packages("changepoint")
+if (!"forecast" %in% installed.packages()) install.packages("forecast")
+if (!"ggfortify" %in% installed.packages()) install.packages("ggfortify")
+if (!"ggchangepoint" %in% installed.packages()) install.packages("ggchangepoint")
+
+# Packages
+library(tidyverse)
+library(ggplot2)
+library(scales) # label_number (formattage des populations)
+library(GGally)
+library(RColorBrewer) # palettes
+
+# Cartes géographiques
+library(raster) # tracé géographique (spplot)
+library(geodata) # chargement des cartes géographiques
+library(colorspace) # palette de couleur
+
+# Classification hiérarchique - Dendrogramme
+library(dendextend)
+
+# Réduction de dimension - ACP
+library(FactoMineR)
+library(factoextra)
+
+# projection Isomap 
+library(vegan) 
+
+# pojection T-SNE
+library(Rtsne)
+
+# Détection de rupture
+library(changepoint)
+library(forecast) # ggAcf
+library(ggfortify) # autoplot
+library(ggchangepoint) # ggcptpoint
+
+
+
+```
+
+```{r}
+#| label: constantes
+#| include: false
+
+# ==========
+# CONSTANTES
+# ==========
+
+# Répertoire et fichiers
+# ----------------------
+DATA_DIR = "./data/raw"
+
+POP_DEPARTEMENTS_CSV = "popdepartements.csv"
+# POP_COMMUNES_CSV = "popcommunes.csv"
+
+# Couleurs
+# --------
+# Palettes sur cartes de France
+ncolors <- 40
+palette_sunset <- rev(sequential_hcl(n=ncolors, palette = "Sunset"))
+palette_green <- rev(sequential_hcl(n=ncolors, palette = "YlGn"))
+palette_bluered <- diverging_hcl(n=ncolors, palette = "Blue-Red 2")
+palette_couronnes = c("Paris"="lightblue", "1ère couronne"="brown", "2ème couronne"="darkgoldenrod", "3ème couronne"="darkgoldenrod1", "autre"="white") #, "royalblue")
+# palette_groupes = brewer.pal(8, "Dark2")
+# palette_groupes = c("#009E73", "#0072B2", "#E69F00")
+# palette_groupes = c("#EDFB3C", "#4F820D", "#92D8FE", "#334C89", "#F8642C", "#9F2A00", "#AD208E", "#61307D")
+palette_groupes = c("mediumvioletred", "#4F820D", "#92D8FE", "#334C89", "#F8642C", "#9F2A00", "#AD208E", "#61307D")
+palette_departements <-c('black','forestgreen', 'red2', 'orange', 'cornflowerblue', 
+                'magenta', 'darkolivegreen4', 'indianred1', 'tan4', 'darkblue', 
+                'mediumorchid1','firebrick4',  'yellowgreen', 'lightsalmon', 'tan3',
+                "tan1",'darkgray', 'wheat4', '#DDAD4B', 'chartreuse', 
+                'seagreen1', 'moccasin', 'mediumvioletred', 'seagreen','cadetblue1',
+                "darkolivegreen1" ,"tan2" ,   "tomato3" , "#7CE3D8","gainsboro")
+
+
+
+```
+
+```{r}
+#| label: fonction load_map_france
+#| include: false
+
+load_map_france <- function () {
+
+  # Chargement de la carte de france avec départements (level=2)
+  france <- gadm(country="FRA", level=2, path="./data/geodata")
+  
+  # Factorisation des données "chaîne de caractères
+  france$NAME_1 <- as.factor(as.character(france$NAME_1)) # régions
+  france$NAME_2 <- as.factor(as.character(france$NAME_2)) # départements
+  
+  return(france)
+}
+
+```
+
+```{r}
+#| label: fonction plot_map
+#| include: false
+
+# map : carte à afficher (France)
+# data_departements : vecteur de données/classes à afficher, indexé par numéro de département (groupe sous la forme de facteurs)
+# palette = vecteur des couleurs associées aux classes
+
+plot_map <- function(data_departements, title, subtitle="", palette=palette_sunset) {
+  
+
+  # Chargement de la carte de France (et département associés)
+  # --------------------------------
+  carte.temp <- load_map_france()
+  
+  # Affection des classes aux départements
+  # --------------------------------------
+  
+  # Création d'une colonne 'display' dans l'objet "map"
+  # contenant les données à afficher dans la colonne 'display'
+  palette = c(palette, "white")
+  carte.temp$display=rep(10, length(carte.temp$NAME_2)) # initialisation des valeurs à 5="autre"
+  
+  # Affectation des valeurs
+  for (d in names(data_departements)) {
+    
+    nom_departement = as.character(df_pop_tous_departements[d,"nomdep"])
+    carte.temp$display[which(toupper(carte.temp$NAME_2)==nom_departement)] <- data_departements[d]
+  }
+  
+  # Légende
+  # . labels = numéros des départements
+  # . couleur = palette
+  # -------------------
+  legende = as.vector(palette)
+  for (i in 1:length(levels(data_departements))) {
+    
+    legende_label = paste(names(data_departements)[data_departements==levels(data_departements)[i]], collapse = "-")
+    names(legende)[i] = paste0("Groupe ", i, " : ", legende_label)
+  }
+  
+  names(legende)[length(legende)] = "autre"
+    
+  # Tracé des départements (ggplot)
+  # ----------------------
+  carte.temp = carte.temp %>% sf::st_as_sf()
+  carte.temp$display <- as.factor(carte.temp$display) # discrétisation des classes
+  carte.temp %>% 
+    ggplot(aes(fill = display)) +
+    geom_sf() +
+    labs(title=title,
+       subtitle=subtitle, col="Départements") +
+    scale_fill_manual(name="Départements", 
+                      labels=names(legende), 
+                      values=as.vector(legende),
+                      )  
+
+}
+```
+
+```{r}
+#| label: fonction grille_annee
+#| include: false
+
+grille_annees <- function(x) x[(seq_along(x)-1) %% 20 == 0]
+```
+
+```{r}
+#| label: Initialisation ggplot
+#| include: false
+
+theme_set(theme_bw(base_size=10))
+
+```
+
+# Introduction
+
+L'objet de cette étude est de mettre en évidence d'éventuels **phénomènes de population entre Paris et sa sphère d'influence**.
+
+Par **sphère d'influence**, on entend les **3 couronnes de départements** au sens administratif tel que défini par l'INSEE à savoir
+
+-   La **1ère couronne** (petite couronne)
+
+    -   92 : Hauts-de Seine
+
+    -   93 : Seine-Saint-Denis
+
+    -   94 : Val-de-Marne
+
+-   La **2ème couronne** (grande couronne)
+
+    -   77 : Seine-et-Marne
+
+    -   78 : Yvelines
+
+    -   91 : Essonne
+
+    -   95 : Val-d'Oise
+
+-   La **3ème couronne**
+
+    -   02 : Aisne
+
+    -   10 : Aube
+
+    -   27 : Eure
+
+    -   28 : Eure-et-Loir
+
+    -   45 : Loiret
+
+    -   51 : Marne
+
+    -   60 : Oise
+
+    -   89 : Yonne
+
+```{r}
+#| label: définition des couronnes
+#| echo: false
+
+# Couronnes
+# ---------
+sphere_couronne_paris = c("75"="PARIS")
+sphere_couronne_1 = c("92"="HAUTS-DE-SEINE", "93"="SEINE-SAINT-DENIS", "94"="VAL-DE-MARNE")
+sphere_couronne_2 = c("77"="SEINE-ET-MARNE", "78"="YVELINES", "91"="ESSONNE", "95"="VAL-D'OISE")
+sphere_couronne_3 = c("02"="AISNE", "10"="AUBE", "27"="EURE", "28"="EURE-ET-LOIR", "45"="LOIRET", "51"="MARNE", "60"="OISE", "89"="YONNE")
+sphere_departements = c(sphere_couronne_paris, sphere_couronne_1, sphere_couronne_2, sphere_couronne_3)
+
+```
+
+```{r}
+#| label: carte des départements Paris et Couronnes
+#| fig-align: center
+#| echo: false
+
+couronnes = vector()
+for (i in sphere_couronne_paris) couronnes[i]=1
+for (i in sphere_couronne_1) couronnes[i]=2
+for (i in sphere_couronne_2) couronnes[i]=3
+for (i in sphere_couronne_3) couronnes[i]=4
+
+
+# Chargement de la carte de France (et département associés)
+# --------------------------------
+carte.temp <- load_map_france()
+
+# Affectation des valeurs
+# -----------------------
+
+# Création d'une colonne 'display' dans l'objet "map"
+# contenant les données à afficher dans la colonne 'display'
+carte.temp$display=rep(5, length(carte.temp$NAME_2)) # initialisation des valeurs à 5="autre"
+for (d in names(couronnes)) {
+  
+  carte.temp$display[which(toupper(carte.temp$NAME_2)==d)] <- couronnes[d]
+}
+
+  
+# Tracé des départements (ggplot)
+# ----------------------
+carte.temp = carte.temp %>% sf::st_as_sf()
+carte.temp$display <- as.factor(carte.temp$display)
+carte.temp %>% 
+  ggplot(aes(fill = display)) +
+  geom_sf() +
+  scale_fill_manual(name="Départements", 
+                    labels=names(palette_couronnes), 
+                    values=as.vector(palette_couronnes),
+                    ) +
+  labs(title="Sphère d'influence parisienne",
+       subtitle="Paris et ses 3 couronnes") +
+  theme(plot.title = element_text(face = "bold", size = 14))
+  
+
+```
+
+Dans les chapitres suivants, on se propose
+
+-   de vérifier si la notion de couronnes telle que définie par l'INSEE est cohérente et homogène au sens de la population
+
+-   d'identifier les mouvements de population historique au sein la sphère d'influence et de les rapprocher le cas échéant d'événements historiques sous-jacents
+
+\newpage
+
+# Préparation des données
+
+Les données travaillées sont les **recensements de population des départements métropolitains de 1780 à 2022**.
+
+Elles sont issues du site [une histoire du conflit politique](https://unehistoireduconflitpolitique.fr/telecharger.html).
+
+::: callout-tip
+### Source des données
+
+**source** : <https://unehistoireduconflitpolitique.fr/telecharger.html>
+
+**section** : Taille d'agglomération et de commune \> Base de données en format CSV
+
+**fichier** : *popdepartements.csv* (130 Mo)
+:::
+
+## Chargement
+
+\small
+
+```{r}
+#| label: PREPARATION chargement des données départements
+
+file = file.path(DATA_DIR, POP_DEPARTEMENTS_CSV)
+df_pop_departements_raw = read.csv(file)
+
+```
+
+```{r}
+#| label: PREPARATION dimensions dataframe departements
+
+# dimensions du jeu de données
+dim(df_pop_departements_raw)
+```
+
+\normalsize
+
+```{r}
+#| label: PREPARATON validation des données
+#| include: false
+#| 
+stopifnot(dim(df_pop_departements_raw)[1]==96) # 96 départements en ligne
+stopifnot(dim(df_pop_departements_raw)[2]==1219) # 1219 colonnes des colonnes popAAAA
+```
+
+Les données se présentent sous la forme d'une table composée
+
+-   des **96 départements métropolitains** en ligne, indexés par leur numéro et leur nom (champs `dep` et `nomdep`)
+
+-   de **1219 colonnes** dont des colonnes au nom sous la forme `popAAAA` où AAAA est une année comprise entre 1780 et 2022 (soit 243 colonnes pertinentes). Ces colonnes sont les **recensements de population du département correspondant**.
+
+## Extraction de l'historique de population de tous les départements
+
+Du jeu de données brut, on extrait dans `df_pop_tous_departements` **les populations de 1780 à 2022** pour **TOUS les départements**, en maintenant les 2 colonnes descriptives :
+
+-   `dep` contient le **code du département** au format factoriel
+
+-   `nomdep` contient le **nom du département** au format factoriel
+
+\small
+
+```{r}
+#| label: dataframe population tous departements
+
+# dataframe : population de tous les départements
+# extraction des colonnes
+# . dep : numéro de département
+# . nomdep : nom des départements
+# . toutes colonnes popxxxx : population de 1780 à 2022
+
+df_pop_tous_departements = df_pop_departements_raw %>% 
+  dplyr::select(c("dep", "nomdep"), matches("^pop[0-9]{4}$") )
+
+# Indexation des lignes par le code département
+row.names(df_pop_tous_departements) = df_pop_tous_departements$dep
+
+# colonnes : retrait du préfix pop devant les années
+colnames(df_pop_tous_departements) <- gsub('^pop', '', 
+                                           colnames(df_pop_tous_departements))
+
+# catégorisation des colonnes dep et nomdep
+df_pop_tous_departements$dep = as.factor(df_pop_tous_departements$dep)
+df_pop_tous_departements$nomdep = as.factor(df_pop_tous_departements$nomdep)
+```
+
+```{r}
+dim(df_pop_tous_departements)
+```
+
+```{r}
+#| label: données manquantes
+
+# Décompte des Données manquantes dans le dataframe
+df_pop_tous_departements %>% 
+  is.na() %>% 
+  sum()
+```
+
+\normalsize
+
+```{r}
+#| label: assertion df_pop_tous_departement
+#| include: false
+
+stopifnot(dim(df_pop_tous_departements)[1]==96) # 96 départements
+stopifnot(dim(df_pop_tous_departements)[2]==245) # 243 ans + 2 descriptives
+stopifnot(df_pop_tous_departements %>% is.na() %>% sum() == 0) # pas de données manquantes
+```
+
+`df_pop_tous_departements` contient donc le **recensement de population** des **96 départements métropolitains** sur **243 ans (de 1780 à 2022)**.
+
+Les lignes sont indexées par le **code de département**.
+
+Les colonnes sont indexées par
+
+-   `dep` code de département
+
+-   `nomdep` nom de département
+
+-   `AAAA` année de l'observation
+
+il ne contient **pas de données manquantes.**
+
+## Extraction de l'historique de population de la sphère parisienne
+
+On définit **4 listes de départements** représentant les 4 couronnes :
+
+-   `sphere_couronne_paris`, département parisien
+
+-   `sphere_couronne_1`, département de la petite couronne
+
+-   `sphere_couronne_2`, département de la grande couronne
+
+-   `sphere_couronne_3`, département de la 3ème couronne
+
+\small
+
+```{r}
+#| label: COURONNES definition
+
+sphere_couronne_paris = c("75")
+sphere_couronne_1 = c("92", "93", "94")
+sphere_couronne_2 = c("77", "78", "91", "95")
+sphere_couronne_3 = c("02", "10", "27", "28", "45", "51", "60", "89")
+```
+
+\normalsize
+
+On sélectionne dans le jeu de données initial les départements qui nous intéressent à savoir les départements de Paris et des 3 couronnes.
+
+\small
+
+```{r}
+#| label: COURONNES extraction
+
+# population des couronnes
+df_pop_couronnes = df_pop_tous_departements %>% 
+  filter(dep %in% c(sphere_couronne_paris, sphere_couronne_1, 
+                    sphere_couronne_2, sphere_couronne_3))
+
+```
+
+```{r}
+#| label: COURONNES dimension
+#| 
+dim(df_pop_couronnes)
+```
+
+\normalsize
+
+On a collecté dans `df_pop_couronnes` **243 ans de recensement** pour les **16 départements Paris et ses 3 couronnes**.
+
+\newpage
+
+# 1ère approche des données
+
+## Population française
+
+**Population française métropolitaine**
+
+\small
+
+```{r}
+#| label: population française
+
+# Population = Somme par colonne de la population de tous les départements
+df_pop_france = t(data.frame(colSums(df_pop_tous_departements[,3:ncol(df_pop_tous_departements)])))
+row.names(df_pop_france) = "france"
+```
+
+\normalsize
+
+```{r}
+#| label: Evolution population française
+#| fig-align: center
+#| echo: false
+
+
+table = as.data.frame(df_pop_france) %>%
+  gather("année", "population", 1:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population) +
+    geom_point(size=1, colour="royalblue") +
+  
+    scale_x_discrete(breaks=grille_annees) +  
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+  
+    labs(title="Evolution de la population française (métropole)",
+       subtitle="France") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +
+  
+    geom_vline(xintercept=1800-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1870-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1914-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1955-1780, colour="royalblue", linetype="longdash")
+  
+    
+
+
+```
+
+On note "à l’œil" que la population française métropolitaine connaît plusieurs phases
+
+-   jusqu'en 1800, la population stagne
+
+-   A partir de 1800 jusqu'en 1945, la population présente une évolution régulière et relativement lente, qui connaît 2 "accidents" correspondant à la guerre franco-prussienne de 1870 et à la 1ère guerre mondiale.
+
+-   après 1955, une augmentation plus forte de la démographie post-seconde guerre mondiale (Baby Boom)
+
+\small
+
+```{r}
+df_pop_couronnes_marginale = t(data.frame(colSums(df_pop_couronnes[3:ncol(df_pop_couronnes)])))
+row.names(df_pop_france) = "france"
+```
+
+\normalsize
+
+**Population de la sphère (Paris + couronnes)**
+
+```{r}
+#| label: Evolution de la population de la sphère parisienne
+#| fig-align: center
+#| echo: false
+
+table = as.data.frame(df_pop_couronnes_marginale) %>%
+  gather("année", "population", 1:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population) +
+    geom_point(size=1, colour="orange") +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+  
+    labs(title="Evolution de la population",
+       subtitle="Sphère d'influence parisienne (Paris + couronnes)") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +  
+  
+    geom_vline(xintercept=1800-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1870-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1914-1780, colour="royalblue", linetype="longdash") +
+    geom_vline(xintercept=1955-1780, colour="royalblue", linetype="longdash")
+
+
+```
+
+En reportant les paliers de population française sur l'évolution de la population de la sphère, on constate
+
+-   que la courbe suit celle de la démographie française,
+
+-   qu'elle connaît les mêmes inflexions, dans les mêmes proportions.
+
+On supposera ici que si des mouvements de populations atypiques sont constatés dans les différentes couronnes de la sphère, ils sont dus à des mouvements intrinsèques.
+
+Regardons plus précisément l'évolution de population des couronnes de la sphère.
+
+## Population parisienne
+
+\small
+
+```{r}
+#| label: Extraction population parisienne
+
+
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_paris)
+
+```
+
+\normalsize
+
+```{r}
+#| label: Visualisation population parisienne
+#| fig-align: center
+#| fig-width: 8
+#| echo: false
+
+table = table %>% 
+  gather("année", "population", 3:ncol(.))
+
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line() +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+  
+    scale_color_manual(name="Départements",
+                      labels=names(palette_couronnes),
+                      values=as.vector(palette_couronnes),
+                      ) +
+
+    labs(title="Evolution de la population",
+       subtitle="Paris", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +    
+  
+    geom_vline(xintercept=1800-1780+1, colour=palette_couronnes["Paris"], linetype="longdash") +
+    geom_vline(xintercept=1910-1780+1, colour=palette_couronnes["Paris"], linetype="longdash") +
+    geom_vline(xintercept=1963-1780+1, colour=palette_couronnes["Paris"], linetype="longdash")
+
+
+```
+
+Paris connaît une évolution de population qui se distingue nettement de celle de la population française :
+
+-   Jusqu'au début de la 1ère guerre mondiale, la population parisienne croît dans des proportions plus fortes que la moyenne française. Cette phase coïncide avec la phase d'exode rural que connaît la France à cette période.
+
+-   Alors que la population française poursuit sa croissance après la 1ère guerre mondiale, la population parisienne plafonne jusque l'après Seconde Guerre Mondiale, puis commence à décroître au moment où la France connaît le "Baby Boom"
+
+-   La population parisienne décroît jusqu'aux années 2000 pour connaitre un rebond au début du 21ème siècle.
+
+La littérature tend à justifier la stagnation et la décroissance par un équilibrage des populations entre Paris et sa banlieue (saturation urbaine, plans immobiliers dans les années 70, augmentation du prix du logement). Le rebond serait dû à une augmentation de la natalité dans les classes les plus défavorisées.
+
+## Population des couronnes
+
+\small
+
+```{r}
+#| label: Extraction population couronne 1
+
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_1)
+
+```
+
+\normalsize
+
+```{r}
+#| label: Visualisation population couronne 1
+#| fig-align: center
+#| fig-width: 8
+#| echo: false
+
+table = table %>% 
+  gather("année", "population", 3:ncol(.))
+
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+    scale_color_brewer(palette = "Dark2") +
+  
+    labs(title="Evolution de la population",
+       subtitle="1ère couronne", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +    
+
+    geom_vline(xintercept=1802-1780+1, colour=palette_couronnes["1ère couronne"], linetype="longdash") +
+    geom_vline(xintercept=1914-1780+1, colour=palette_couronnes["1ère couronne"], linetype="longdash") +
+    geom_vline(xintercept=1963-1780+1, colour=palette_couronnes["1ère couronne"], linetype="longdash")
+
+
+```
+
+\small
+
+```{r}
+#| label: Extraction population couronne 2
+
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_2)
+```
+
+\normalsize
+
+```{r}
+#| label: Visualisation population couronne 2
+#| fig-align: center
+#| fig-width: 8
+#| echo: false
+
+table = table %>% 
+  gather("année", "population", 3:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) + #shape=20, ) + 
+
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+    scale_color_brewer(palette = "Dark2") +
+  
+    labs(title="Evolution de la population",
+         subtitle="2ème couronne", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +      
+  
+
+    
+    geom_vline(xintercept=1802-1780+1, colour=palette_couronnes["2ème couronne"], linetype="longdash") +
+    geom_vline(xintercept=1914-1780+1, colour=palette_couronnes["2ème couronne"], linetype="longdash") +
+    geom_vline(xintercept=1963-1780+1, colour=palette_couronnes["2ème couronne"], linetype="longdash") 
+
+```
+
+\small
+
+```{r}
+#| label: Extraction population couronne 3
+
+# population dans la couronne 3
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_3)
+```
+
+\normalsize
+
+```{r}
+#| label: Visualisation population couronne 3
+#| fig-align: center
+#| fig-width: 8
+#| echo: false
+
+table = table %>% 
+  gather("année", "population", 3:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+    scale_color_brewer(palette = "Dark2") +
+
+  
+    labs(title="Evolution de la population",
+       subtitle="3ème couronne", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +      
+  
+    geom_vline(xintercept=1800-1780+1, colour=palette_couronnes["3ème couronne"], linetype="longdash") +
+    geom_vline(xintercept=1914-1780+1, colour=palette_couronnes["3ème couronne"], linetype="longdash") +
+    geom_vline(xintercept=1963-1780+1, colour=palette_couronnes["3ème couronne"], linetype="longdash") 
+
+```
+
+Le comportement des départements de la **1ère couronne** est plutôt homogène :
+
+-   Leur population commence à croître fortement à partir de 1850 (contre 1800 à Paris)
+
+-   Une "cassure" dans le rythme de croissance (sans pour autant la rompre) est constatée dans le courant des années 60, au moment où la population parisienne commence à décroître.
+
+-   La croissance se poursuit jusqu'en 2022
+
+Le comportement des départements de la **2ème couronne** est homogène :
+
+-   Leur population plutôt basse stagne jusqu'au début de la 1ère guerre mondiale (alors que pendant ce temps, la population française augmente et que la population parisienne explose).
+
+-   La population commence à croître fortement après-guerre jusqu'à nos jours (alors que la population parisienne stagne puis décroît)
+
+En ce qui concerne la **3ème couronne**, les comportements des départements sont diverses ; il est complexe d'en sortir des généralités si ce n'est que ces départements ne connaissent pour la plupart ni la croissance française, ni la croissance parisienne jusqu'en 1945.
+
+On commence ici à voir se dessiner la notion de sphère d'influence en termes de population.
+
+Alors que la population de la sphère suit globalement la croissance de la population française, on constate des particularités à l'intérieur de la sphère :
+
+-   Paris et sa 1ère couronne ont jusqu'à la 1ère guerre mondiale une croissance plus forte que celle de la France, vraisemblablement alimentée par les populations stagnantes des couronnes 2 et 3,
+
+-   Un stagnation et une décroissance de la population parisienne au moment du Baby Boom vraisemblablement au profit des 3 couronnes (principalement 2 et 3)
+
+\newpage
+
+# Stratégie de l'étude
+
+Pour approfondir l'étude des mouvements de population au sein de la sphère d'influence, on propose une étude du **profil temporel de chaque département**.
+
+L'idée est de classifier les départements en fonction de la façon dont leur population évolue dans le temps.
+
+Dans un second temps, on identifiera les moments clés de l'évolution de la population parisienne et on les rapprochera des profils moyens pour mettre en avant des mouvements de population entre Paris et ses couronnes.
+
+Pour ce faire,
+
+-   on appliquera par département (i.e. par ligne) une **normalisation min-max** de telle sorte que pour chaque département,
+
+    -   le minimum de sa population dans le temps soit 0
+
+    -   le maximum de sa population dans le temps soit 100
+
+    La mise à la même échelle de tous les départements les rend indépendants de la taille du département et permet de concentrer l'étude sur la façon dont la population évolue.
+
+-   On procédera alors à une **classification** pour rapprocher les profils similaires et on en déduira des profils moyens.
+
+-   Enfin, on effectuera sur la population parisienne une **détection de ruptures** pour identifier les moments clés.
+
+    Ces moments clés seront rapprochés de la courbe des profils moyens pour mettre en avant d'éventuelles coïncidences dans leurs caractéristiques.
+
+\newpage
+
+# Profilage des départements
+
+Dans ce chapitre, on cherche
+
+-   à mettre en avant les caractéristiques de l'évolution de la population d'un département indépendamment de sa taille
+
+-   à rapprocher des départements ayant connu une évolution similaire
+
+5 étapes
+
+-   **Normaliser** la population des départements sur une échelle de 0 à 100 par une technique de **mise à l'échelle Min-Max**
+
+-   **Visualiser** couronne par couronne les profils des départements
+
+-   **Classifier** les profils par une technique de **clustering hiérarchique**
+
+-   Calculer un **profil moyen** par classe
+
+- Valider "géométriquement" la classification par méthodes ACP et Isomap
+
+## Mise à l'échelle min-max
+
+\small
+
+```{r}
+#| label: PROFILS normalisation
+
+# normalisation min-max
+# ---------------------
+minmax_scaling = function(row) {
+  
+  row_min <- min(row)
+  row_max <- max(row)
+  
+  normalized_row <- (row-row_min)/(row_max-row_min)
+  
+  return(normalized_row)
+}
+
+# Application aux départements de la sphère
+# -----------------------------------------
+df_profils_dep = apply( df_pop_couronnes[,3:ncol(df_pop_couronnes)], 
+                        MARGIN=1, # par ligne
+                        FUN=function(row_departement) 
+                          100 * round( minmax_scaling(row_departement), 2)
+                  )
+
+# ajouter les colonnes dep et nomdep
+df_profils_dep = cbind(df_pop_couronnes[,1:2], t(df_profils_dep)) 
+
+```
+
+\normalsize
+
+```{r}
+#| label: PROFILS ASSERTION min 0 et max 100 par ligne
+#| include: false
+
+# VERIFICATION : 
+# toutes les lignes (départements) doivent avoir un min à 0 et un max à 100
+
+# min à 0 sur toutes les lignes
+apply(df_profils_dep[,3:ncol(df_profils_dep)],
+      MARGIN=1,
+      FUN=function(row) stopifnot(min(row)==0)
+)
+
+# min à 0 sur toutes les lignes
+apply(df_profils_dep[,3:ncol(df_profils_dep)],
+      MARGIN=1,
+      FUN=function(row) stopifnot(max(row)==100)
+)
+
+```
+
+## Visualisation des profils temporels
+
+```{r}
+#| label: profil temporel des départements (Paris)
+#| fig-align: center
+#| echo: false
+
+table = df_profils_dep %>%
+  filter(dep %in% sphere_couronne_paris) %>% 
+  gather("année", "population", 3:ncol(.))
+
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_brewer(palette = "Dark2") +
+  
+    labs(title="Profils de département", subtitle="Paris", col="Départements") +
+  
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+
+```
+
+```{r}
+#| label: profil temporel des départements de la 1ère couronne
+#| fig-align: center
+#| echo: false
+
+
+table = df_profils_dep %>%
+  filter(dep %in% sphere_couronne_1) %>% 
+  gather("année", "population", 3:ncol(.))
+
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_brewer(palette = "Dark2") +
+
+  
+    labs(title="Profils de département", subtitle="1ère couronne", col="Départements") +
+  
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+
+```
+
+```{r}
+#| label: profil temporel des départements de la 2ème couronne
+#| fig-align: center
+#| echo: false
+
+table = df_profils_dep %>%
+  filter(dep %in% sphere_couronne_2) %>% 
+  gather("année", "population", 3:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_brewer(palette = "Dark2") +
+
+    labs(title="Profils de département", subtitle="2ème couronne", col="Départements") +
+  
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+
+
+```
+
+```{r}
+#| label: profil temporel des départements de la 3ème couronne
+#| fig-align: center
+#| echo: false
+
+table = df_profils_dep %>%
+  filter(dep %in% sphere_couronne_3) %>% 
+  gather("année", "population", 3:ncol(.))
+
+# ggplot(data=table) +
+#     aes(x=année, y=population, col=nomdep) +
+#     geom_line() +
+#     geom_point(size=1) +
+#     labs(title="Profil de département",
+#        subtitle="3ème couronne")
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_brewer(palette = "Dark2") +
+
+    labs(title="Profils de département", subtitle="3ème couronne", col="Départements") +
+  
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+```
+
+Indépendamment de leur taille respective, les départements de la **1ère et 2ème couronne** ont respectivement une évolution de leur population similaire à travers le temps.
+
+L'évolution de la population des départements de la **3ème couronne** est plus **chaotique** : il est complexe à l'oeil de confirmer / infirmer la proximité des départements. Le constat est sans doute dû au fait que l'on a à faire à des départements à faible population en valeur absolue de telle sorte que tout mouvement de population a un impact fort sur le département.
+
+Il est aussi complexe de déterminer des rapprochements entre départements de couronnes différentes.
+
+Pour regrouper les profils, on va appliquer une méthode de **classification hiérarchique**.
+
+\newpage
+
+## Regroupement des profils
+
+**A noter**
+
+Dans le cadre de la classification et aussi de la projection à venir, on utilisera la **distance euclidienne entre les séries temporelles** pour en simplifier l'analyse.
+
+Une approche avec des distances "optimal matching" du type Dynamic Time Warping, basées plutôt sur la forme des courbes, permettrait certainement d'optimiser les résultats.
+
+### Clustering hiérarchique
+
+\small
+
+```{r}
+#| label: CLUSTERING library
+#| 
+library(dendextend)
+```
+
+```{r}
+#| label: CLUSTERING Distance euclidienne et dendrogramme
+
+hc = hclust(dist(df_profils_dep[,3:ncol(df_profils_dep)], 
+                 method="euclidean"), method="ward.D2")
+
+dend = as.dendrogram(hc)
+```
+
+\normalsize
+
+```{r}
+#| label: CLUSTERING visualisation dendrogramme
+#| fig-align: center
+#| echo: false
+
+dend.plot <-  as.dendrogram(dend) %>%
+   set("branches_lwd", 2) %>% # Branches line width
+   set("labels_cex", 0.7) # Change label size
+
+plot(dend.plot,
+     horiz=TRUE,
+     main="Profils de départements de la sphére parisienne",
+     sub="dendrogramme")
+
+```
+
+::: callout-important
+On décide de scinder les profils en **7 classes**.
+:::
+
+\small
+
+```{r}
+#| label: CLUSTERING Choix du nombre de classes
+
+# Nombre de groupes
+nb_classes=7
+```
+
+```{r}
+#| label: CLUSTERING Découpe des classes
+
+# classification hiérarchique : assignation des groupes
+# ---------------------------
+clusters = cutree(dend, k=nb_classes)
+```
+
+```{r}
+#| label: CLUSTERING Visualisation du dendrogramme coloré
+#| fig-align: center
+
+# Visualisation du dendrogramme avec identification des groupes
+# ------------------------------------------------------------
+dend.plot <-  as.dendrogram(dend) %>%
+   set("branches_lwd", 2) %>% # Branches line width
+   set("branches_k_color", palette_groupes, 
+                          k = nb_classes) %>% # Color branches by groups
+   set("labels_cex", 0.7) # Change label size
+
+
+plot(dend.plot,
+     horiz=TRUE,
+     main="Profils des départements de la sphére parisienne",
+     sub="dendrogramme")
+
+```
+
+```{r}
+#| label: CLUSTERING Visualisation des classes
+
+clusters = as.factor(clusters)
+clusters
+```
+
+```{r}
+#| label: CLUSTERING Nom des classes
+
+# Assignation d'un nom aux groupes 
+# (nom = concaténation des numéros de départements du groupe)
+# ---------------------------------------------
+clusters_name = c()
+for (g in levels(clusters)) {
+  
+  # concaténation des numéro des départements du groupe
+  name = paste(names(clusters)[clusters==g], collapse = "-")
+  clusters_name[g] = name
+}
+```
+
+\normalsize
+
+### Visualisation des groupes
+
+```{r}
+#| label: CLUSTERING visualisation des classes
+#| fig-align: center
+#| echo: false
+
+plot_map(data_departements=as.factor(clusters), 
+         title="Profils des départements dans la sphère parisienne",
+         subtitle="Regroupement par classification hiérachique",
+         palette=palette_groupes[1:nb_classes])
+```
+
+La classification en 7 classes rebat les cartes des couronnes.
+
+-   Paris et la 1ère couronne sont maintenus dans leur spécificité et leur homogénéité en 2 classes distinctes
+
+-   Tout en maintenant en cohésion les départements de la 2ème couronne (77/78/91/95), elle a aussi associé un certain nombre de départements de la 3ème couronne (28/45/60).
+
+-   Elle isole le comportement du reste des départements de l'Est de la 3ème couronne (02, 51, 89)
+
+-   Bien qu'éloignés géographiquement, les profils des départements 10 et 27 sont suffisamment proches pour être rapprochés dans un même groupe.
+
+**Visualisation des profils par classe**
+
+\small
+
+```{r}
+#| label: CLUSTER ajout du groupe au dataframe
+#| 
+# Ajout du groupe aux départements (coonne groupe)
+df_profils_dep_w_groups = df_profils_dep
+df_profils_dep_w_groups = cbind(groupe=clusters[as.character(df_profils_dep_w_groups$dep)], 
+                                df_profils_dep_w_groups)
+df_profils_dep_w_groups$groupe = as.factor(df_profils_dep_w_groups$groupe)
+```
+
+\normalsize
+
+```{r}
+#| label: CLUSTER Visualisation des classes
+#| echo: false
+
+# Affichage groupe 1 à 2
+table = df_profils_dep_w_groups %>%
+  gather("année", "population", 4:ncol(.))
+
+
+groupe_labeller = cust_labeller <- function(x) paste0("Groupe ", x, " [ ", clusters_name[x], " ]")
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_manual(values=as.vector(palette_departements)) +
+  
+    labs(title="Profils par groupe", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +
+  
+    # facet_grid(groupe ~ .)
+    facet_wrap(~ groupe, strip.position="top", labeller=as_labeller(groupe_labeller))
+
+```
+
+La visualisation permet de confirmer "à l'oeil" l'homogénéité des profils d'une même classe et d'identifier les caractéristiques qui isolent certains départements (la forte décroissance de la population de l'Yonne (89) ou les "fortes cassures" au moment de la 1ère guerre mondiale (02-51)).
+
+On comprend aussi la "proximité" sur le dendrogramme du département 51 (Marne - groupe 4) et de la classe 7 (1ère couronne) : l'évolution de leur population est similaire à un "accident important" près lors de la 1ère guerre mondiale.
+
+### Profils moyens
+
+\small
+
+On crée un nouveau Data Frame de profils moyens par classe à partir du Data Frame de tous les profils.
+
+```{r}
+#| label: CLUSTERING profils moyens
+#| 
+
+df_profils_dep_moyen = df_profils_dep_w_groups %>% 
+  group_by(groupe) %>%
+  summarise(across(starts_with("1"), mean)) %>% 
+  column_to_rownames(var = "groupe") %>% 
+  as.data.frame()
+```
+
+\normalsize
+
+```{r}
+#| label: CLUSTERING Visualisation des profils moyens
+#| fig-align: center
+#| echo: false
+
+# table des moyennes par groupe
+table = df_profils_dep_w_groups %>% 
+  gather("année", "population", 4:ncol(.)) %>% 
+  group_by(groupe, année) %>%  
+  summarise(mean_population=mean(population))
+
+groupe_labeller = cust_labeller <- function(x) paste0("Groupe ", x, " [ ", clusters_name[x], " ]")
+
+ggplot(data=table) +
+    aes(x=année, y=mean_population, col=groupe) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_manual(values=as.vector(palette_groupes)) +
+  
+    labs(title="Profils moyens par groupe", col="Groupes") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +
+  
+    facet_wrap(~ groupe, strip.position="top", labeller=as_labeller(groupe_labeller))
+
+
+```
+
+```{r}
+#| label: CLUSTERING mesure de corrélation entre profils
+
+
+# Création d'un Dataframe avec
+# . groupes en colonne 
+# . années en ligne
+
+table = df_profils_dep_w_groups %>% 
+  group_by(groupe) %>%
+  summarise(across(starts_with("1"), mean)) %>% 
+  column_to_rownames(var = "groupe") %>% 
+  as.data.frame() %>% 
+  t()
+
+# Corrélation du groupe 5 avec les autre groupe
+cor(table, method="pearson")[,5]
+
+```
+
+Un calcul de corrélation entre le département parisien (Groupe 5) comme référence et le profil moyen des autres classes montre
+
+-   des corrélations positives fortes entre Paris et les groupes 4 (51-Marne) et Groupe 7 (petite couronne)
+
+    On peut supposer que ces départements ont connu des mouvements de population similaires en tant que pôle d'attraction des populations.
+
+-   des corrélations négatives
+
+    -   relativement fortes entre Paris et le département de l'Yonne (89) (Groupe 6)
+
+    -   relativement faible entre Paris et les départements du Groupe 2 (27-Eure et 10-Aube)
+
+    On peut supposer des transferts de population entre ces départements et Paris.
+
+\newpage
+
+## Projection
+
+Les valeurs des individus étant normalisées "en ligne" (valeurs de 0 à 100), on se propose d'utiliser des techniques de projection en dimension restreinte pour apprécier la cohérence "géométrique" des résultats de la classification.
+
+En retenant la **distance euclidienne** pour mesurer les distances entre profils, il s'agit d'identifier des plans sur lesquels les individus sont les mieux représentés.
+
+On appliquera 2 techniques :
+
+-   une **analyse en composantes principales**
+
+-   **Isomap**, que l'on sait conserver les distances entre individus après projection
+
+### ACP
+
+**ACP sur les profils de départements de la sphère d'influence**
+
+\small
+
+```{r}
+#| label: ACP
+#| 
+profils_dep_pca = PCA(df_profils_dep %>% dplyr::select(-dep, -nomdep), 
+                    scale.unit = FALSE, 
+                    graph = FALSE, 
+                    ncp=ncol(df_profils_dep)-2)
+```
+
+\normalsize
+
+**Visualisation de la part de variance portée par les axes**
+
+\small
+
+```{r}
+#| label: ACP valeurs propres
+#|  
+profils_dep_pca$eig[1:5, 2]
+```
+
+\normalsize
+
+```{r}
+#| label: ACP visualisation des valeurs propres
+#| fig-align: center
+#| echo: false
+
+fviz_eig(profils_dep_pca, choice = c("variance", "eigenvalue"), geom = c("bar",
+  "line"), barfill = "#2E9FDF", barcolor = "dodgerblue4",
+  linecolor = "brown", addlabels = TRUE, hjust = 0,
+  main = NULL, xlab = "axes", ylab = "% variance", ggtheme = theme_minimal(),
+  title="Part de variance expliquée par ACP")
+
+```
+
+Les 2 premiers axes portent 96,7% de la variabilité du jeu de données.
+
+```{r}
+#| label: ACP visualisation de la projection sur les 2 premiers axes
+#| fig-align: center
+#| eval: false
+
+plot(profils_dep_pca,
+     title="ACP sur les profils de départements",
+     col.quali="groupe",)
+```
+
+```{r}
+#| label: ACP visualisation de la projection avec classification
+#| fig-align: center
+#| echo: false
+
+ggplot(data.frame(profils_dep_pca$ind$coord[,1:2]), aes(Dim.1, Dim.2)) + 
+  geom_point(col=palette_groupes[clusters]) +
+  ggrepel::geom_text_repel(aes(label=df_pop_couronnes$nomdep)) +
+  
+  labs(title="ACP sur profils de départements") +
+  theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+
+```
+
+L'axe 1 oppose les départements Paris et 1ère couronne (plus la Marne, très similaire comme vu précédemment) et les départements 2ème et 3ème couronnes.
+
+L'axe 2 oppose les classes 3 et 7 regroupant la majorité des départements et les classes isolant les départements atypiques (89-02-51).
+
+L'ACP confirme :
+
+-   La proximité des éléments d'une même classe
+
+-   La particularité des départements 89-10-27 (Yonne-Aube-Eure) que l'on sait en corrélation négative avec les autres profils.
+
+### isomap
+
+\small
+
+```{r}
+#| label: ISOMAP en distance euclidienne
+
+# Mesure des distances entre les profils de départements
+profils_dep_dist = as.matrix(dist(df_profils_dep[,3:ncol(df_profils_dep)], 
+                                  method="euclidean", diag=TRUE, upper=TRUE))
+
+# Isomap sur les populations des couronnes
+profils_dep_isomap <- isomap(profils_dep_dist, ndim=2, k=nb_classes)
+
+# Variance expliquée avec Isomap
+sum(profils_dep_isomap$eig[1:2])/sum(profils_dep_isomap$eig[1:nb_classes])
+```
+
+\normalsize
+
+isomap capte 92% de la variabilité des données sur les 2 premiers axes.
+
+```{r}
+#| label: ISOMAP graphe ACP
+#| echo: false
+
+p1 <- ggplot(data.frame(profils_dep_pca$ind$coord[,1:2]), aes(Dim.1, Dim.2)) + 
+  geom_point(col=palette_groupes[clusters]) +
+  ggrepel::geom_text_repel(aes(label=df_pop_couronnes$nomdep))
+```
+
+```{r}
+#| label: ISOMAP graphe isomap
+#| echo: false
+
+p2 <- ggplot(data.frame(profils_dep_isomap$points), aes(Dim1, Dim2)) + 
+  geom_point(col=palette_groupes[clusters]) +  
+  ggrepel::geom_text_repel(aes(label=df_pop_couronnes$nomdep))
+```
+
+```{r}
+#| label: ISOMAP visualisation comparaison ACP ISOMAP
+#| fig-align: center
+#| echo: false
+#| eval: false
+
+ggmatrix(list(p1,p2), nrow=1, ncol=2, title="Comparaison ACP et Isomap") + theme_bw()
+```
+
+```{r}
+#| label: ISOMAP graphe isomap seul
+#| fig-align: center
+#| echo: false
+
+p2 +
+  labs(title="Isomap sur profils de départements") +
+  theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12))
+
+```
+
+Isomap conforte
+
+-   l'homogénéité des départements d'une même classe,
+
+-   les écarts entre classes
+
+-   le côté atypique des départements Aisne et Yonne.
+
+\newpage
+
+# Identification des moments clés dans la population parisienne
+
+Dans ce chapitre, on se propose
+
+-   d'identifier des **points de rupture** dans la courbe de population parisienne par une **méthode PELT à pénalité optimisée par CROPS**.
+
+-   de les rapprocher du profil temporel moyen des groupes identifiés précédemment
+
+Il s'agit ici de déterminer s'il est possible de mettre en corrélation les inflexions des courbes et tirer des enseignements sur de potentiels transferts de population entre départements dans la sphère.
+
+## Préparation des données
+
+\small
+
+```{r}
+#| label: CPT Extraction de la population Paris
+
+# Transformation de la population parisienne en série temporelle
+# ---------------------------------
+
+# Population de Paris en colonne
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_paris) %>% 
+  gather("année", "population", 3:ncol(.))
+
+# Conversion en série temporelle
+ts_paris = ts(table[,"population"], start=1780, frequency=1)
+
+```
+
+\normalsize
+
+```{r}
+#| label: CPT visualisation de la population Paris
+#| fig-align: center
+#| 
+autoplot(ts_paris) +
+  theme_minimal() +
+  labs(title="Evolution de la population", 
+       subtitle="Paris")
+```
+
+**Calcul du "log return" de la série temporelle**
+
+\small
+
+```{r}
+#| label: CPT Calcul Log-return
+#| 
+
+# Calcul du log-return
+# -------------------
+ts_paris_diff = diff(log(ts_paris))
+```
+
+\normalsize
+
+```{r}
+#| label: CPT Visualisation du Log-return
+#| fig-align: center
+#| echo: false
+
+plot(ts_paris_diff,
+     main="Population parisienne (log-return)",
+     xlab="Année",
+     ylab="population (log-return)",
+     cex.main=0.9)
+```
+
+## Détection des points de rupture (PELT pénalité CROPS)
+
+Pour identifier les moments clés dans l'évolution de la population parisienne, on va utiliser une **méthode PELT** avec une pénalité optimisée **CROPS**.
+
+On initie l'algorithme avec les caractéristiques suivantes:
+
+-   un minimum de 10 ans entre 2 points de rupture ce qui semble raisonnable au vu des phénomènes recherchés et de l'échelle de temps.
+
+-   une large palette de pénalités candidates (1 à la taille de la série temporelle)
+
+-   une hypothèse de loi normale (communément admise pour une série en log-return)
+
+\small
+
+```{r}
+#| label: CROPS cpt.meanvar
+
+# Méthode PELT CROPS (moyenne-variance)
+# ------------------
+ts_paris_crops = cpt.meanvar(ts_paris_diff,
+                      test.stat = "Normal",
+                      method="PELT",
+                      penalty="CROPS",
+                      pen.value=c(1,length(ts_paris_diff)), 
+                      minseglen=10)
+
+```
+
+```{r}
+#| label: CROPS cpt.meanvar resultats
+
+# Visualisation du résultats
+ts_paris_crops
+```
+
+```{r}
+#| label: CROPS cpt.meanvar configuration points de rupture
+
+# Dimensions
+dim(cpts.full(ts_paris_crops))
+```
+
+```{r}
+#| label: CROPS cpt.meanvar pénalités
+#| 
+
+# Visualisation des pénalités "pertinentes" identifiées
+# -----------------------------------------------------
+round(pen.value.full(ts_paris_crops), digits=2)
+```
+
+La méthode PELT avec pénalité crops a identifié **14 pénalités pertinentes** pour un **maximum de 17 points de rupture**.
+
+**Visualisation des configurations contenant le moins de points de ruptures**
+
+```{r}
+#| label: CROPS cpt.meanvar derières configurations
+#| 
+
+# Pénalités les plus élevées, identifiant le moins de points de rupture
+# -----------------------------
+
+len = dim(cpts.full(ts_paris_crops))[1]
+cpts.full(ts_paris_crops)[(len-6):len, 1:10]
+```
+
+\normalsize
+
+**Choix de la pénalité optimale**
+
+```{r}
+#| label: CROPS cpt.meanvar visualisation couts vs cpt
+#| fig-align: center
+#| echo: false
+
+plot(ts_paris_crops, 
+     diagnostic=TRUE,
+     main="Pénalité versus points de rupture",
+     cex.main=0.9,
+     cex.lab=0.7,
+     cex.axis=0.7)
+
+abline(v=3)
+abline(v=9)
+```
+
+2 cas peuvent être envisagés :
+
+-   Une configuration à 3 points de rupture
+
+-   Une configuration à 9 points de rupture
+
+**version en 3 points de rupture**
+
+```{r}
+#| label: CROPS cpt.meanvar 3 cpt
+#| fig-align: center
+#| echo: false
+
+plot(ts_paris_crops, 
+     ncpts=3,
+     main="Points de rupture détectés",
+     xlab="Année",
+     ylab="population (log-return)",
+     cpt.width=2,
+     cpt.col="cornsilk4",
+     cex.main=0.9)     
+```
+
+\small
+
+```{r}
+#| label: CROPS cpt.meanvar pénalité optimale et années 3 points
+#| fig-align: center
+
+# Points de rupture
+len = dim(cpts.full(ts_paris_crops))[1]
+ts_paris_cp_index = cpts.full(ts_paris_crops)[len-1, 1:3]
+
+# Pénalité associée
+ts_paris_penality = round(pen.value.full(ts_paris_crops)[len-1], digits=2)
+ts_paris_penality
+
+# Années identifiées comme rupture
+ts_paris_cp=time(ts_paris)[ts_paris_cp_index]
+ts_paris_cp
+```
+
+La configuration en 3 points de rupture correspond
+
+-   à une pénalité de 124.94
+
+-   aux années 1800, 1935, 1953
+
+\normalsize
+
+**version en 9 points de rupture**
+
+```{r}
+#| label: CROPS cpt.meanvar visualisation 9 cpt
+#| fig-align: center
+#| echo: false
+
+plot(ts_paris_crops, 
+     ncpts=9,
+     main="Points de rupture détectés",
+     xlab="Année",
+     ylab="population (log-return)",
+     cpt.width=2,
+     cpt.col="cornsilk4",
+     cex.main=0.9)     
+```
+
+\small
+
+```{r}
+#| label: CROPS cpt.meanvar pénalité optimale et années
+#| fig-align: center
+
+# Points de rupture
+len = dim(cpts.full(ts_paris_crops))[1]
+ts_paris_cp_index = cpts.full(ts_paris_crops)[len-6, 1:9]
+
+# Pénalité associée
+ts_paris_penality = round(pen.value.full(ts_paris_crops)[len-6], digits=2)
+ts_paris_penality
+
+# Années identifiées comme rupture
+ts_paris_cp=time(ts_paris)[ts_paris_cp_index]
+ts_paris_cp
+```
+\normalsize
+
+La configuration en 9 points de rupture correspond
+
+-   à une pénalité de 37.39
+
+-   aux années 1800 1830 1880 1910 1920 1935 1953 1981 1998
+
+::: callout-important
+On prend le parti de conserver la version plus précise à **9 points de rupture**.
+:::
+
+
+**Visualisation des points de rupture identifiés**
+
+```{r}
+#| label: CROPS cpt.meanvar visualisation cpts sur courbe
+#| fig-align: center
+#| echo: false
+
+table = df_pop_couronnes %>%
+  filter(dep %in% sphere_couronne_paris) %>% 
+  gather("année", "population", 3:ncol(.))
+
+ggplot(data=table) +
+    aes(x=année, y=population, col=nomdep) +
+    geom_line() +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_y_continuous(labels = label_number(suffix="M", scale = 1e-6, accuracy=0.01)) + 
+  
+    scale_color_manual(name="Départements",
+                      labels=names(palette_couronnes),
+                      values=as.vector(palette_couronnes),
+                      ) +
+
+    labs(title="Points de rupture identifiés",
+       subtitle="Paris", col="Départements") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +    
+  
+    geom_vline(xintercept = ts_paris_cp - 1780, color="cornsilk4")
+  
+```
+
+Il est intéressant de noter que les 1ères dates identifiées correspondent à des moments importants de la vie industrielle française
+
+-   1800 : début de l'industrialisation et de l'exode rural qui en découle
+
+-   1830 : Expansion de la machine à vapeur et développement du rail
+
+-   1880 Fin de la période d'industrialisation, début de la grande dépression mais aussi début de l'électrification et de l'industrie automobile
+
+Les dates intermédiaires semblent dirigées par l'entre-deux guerres.
+
+Les dernières dates 1953-1981-1988 correspondent d'après la littérature à des moments de politique d'aménagement du territoire (développement des grands ensembles immobiliers en banlieue) ou de natalité forte.
+
+## Projection des moments clés sur les profils temporels moyens
+
+On se propose de projeter les moments clés identifiés sur les profils temporels moyens calculés précédemment.
+
+```{r}
+#| label: projection cpt sur profils
+#| echo: false
+#| eval: false
+
+graphes=list()
+for (group in row.names(df_profils_dep_moyen)) {
+  
+  # Conversion du profil en série temporelle
+  table = df_profils_dep_moyen[group,] %>% 
+    gather("année", "population", 1:ncol(.))
+
+  table[,"population"] <- table[,"population"]+0.01 # maintenir le log fini 
+  
+  # Graphe du profil avec rupture de Paris
+  len <- length(graphes)
+  graphes[[len+1]] <- ggplot(data=table) +
+      aes(x=année, y=population) +
+      geom_line() +
+      geom_point(size=1) +
+      scale_x_discrete(breaks=grille_annees) +
+      labs(title="Points de rupture identifiés",
+         subtitle="--", col="Départements") +
+      theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +    
+      # geom_vline(xintercept = time(ts_paris)[cpts(ts_paris_cp)] - 1780, color="cornsilk4")
+      geom_vline(xintercept = ts_paris_cp - 1780, color="cornsilk4")
+    
+}
+
+```
+
+```{r}
+#| label: affichage des profils
+#| fig-align: center
+#| echo: false
+#| eval: false
+
+pm <- ggmatrix(graphes, 
+               nrow=4, ncol=2, showXAxisPlotLabels = F, showYAxisPlotLabels =F ) + theme_bw()
+pm
+```
+
+```{r}
+#| label: CLUSTERING Visualisation des profils moyens avec moments clés
+#| fig-align: center
+#| fig-width: 8
+#| fig-height: 6
+#| echo: false
+
+# table des moyennes par groupe
+table = df_profils_dep_w_groups %>% 
+  gather("année", "population", 4:ncol(.)) %>% 
+  group_by(groupe, année) %>%  
+  summarise(mean_population=mean(population))
+
+groupe_labeller = cust_labeller <- function(x) paste0("Groupe ", x, " [ ", clusters_name[x], " ]")
+
+ggplot(data=table) +
+    aes(x=année, y=mean_population, col=groupe) +
+    geom_line(size=2) +
+    geom_point(size=1) +
+  
+    scale_x_discrete(breaks=grille_annees) +
+    scale_color_manual(values=as.vector(palette_groupes)) +
+  
+    labs(title="Profil moyen par groupe", col="Groupes") +
+    theme(plot.title = element_text(face = "bold", size = 12), plot.subtitle = element_text(size = 12)) +
+  
+    geom_vline(xintercept = ts_paris_cp - 1780, color="cornsilk4") +
+  
+    facet_wrap(~ groupe, strip.position="top", labeller=as_labeller(groupe_labeller))
+
+
+```
+
+Le phénomène le plus marquant est l'effet Baby Boom (année 1953)
+
+-   On a déjà vu que le moment correspond à une décroissance forte de la population parisienne
+
+-   Il correspond aussi à une forte croissance sur l'ensemble des autres classes.
+
+    La croissance peut certes être expliquée par un accroissement de la natalité locale, mais son importance est telle qu'on peut aussi imaginer qu"un transfert de la population parisienne alimente cette croissance. C'est notamment vrai pour les départements de la classe 3 (2ème couronne + les départements de la 3ème couronne 28-45-60) et les départements de la classe 2 (10-27).
+
+On peut aussi noter que le point de rupture 1880 est aussi significatif pour les classes dont les départements connaissent une chute de leur population au 19ème siècle : les classes 1 (02), 2 (10-27) et 6 (89) connaissent à ce moment précis une forte décroissance de leur population laissant penser à un transfert de population vers Paris.
+
+\newpage
+
+# Conclusion
+
+L'approche par la population montre que Paris et sa 1ère couronne tels que définis par l'INSEE forment un tout cohérent, qui a été un pôle d'attractivité jusqu'au début du Baby-boom post-seconde guerre mondiale.
+
+La segmentation des 2ème et 3ème couronnes est plus floue ; bien que les départements de la 2ème couronne présentent un profil temporel commun, ils sont rejoints par certains départements de la 3ème couronne à savoir l'Eure-et-Loir (28), le Loiret (45) et l'Oise (60). Les autres départements de la 3ème couronne (Marne, Yonne, Aube et Eure) sont plus atypiques.
+
+Dans tous les cas, la projection des moments-clés parisiens sur les profils temporels des autres départements laissent penser que les départements des 2ème et 3ème couronnes sont ceux qui ont contribué le plus à la forte croissance de la population à Paris et en 1ère couronne au 19ème siècle et au début du 20ème siècle (les plus contributeurs étant l'Yonne, l'Eure et l'Aube) ; ils sont aussi les bénéficiaires de la décroissance parisienne depuis le début du Baby-Boom.
+
+
+# Références
+
+Julia Cagé et Thomas Piketty (2023) : *Une histoire du conflit politique. Élections et inégalités sociales en France, 1789-2022,* Paris, Le Seuil
+
+Affichage de données géographiques : [GAD Maps and Data](https://gadm.org)
+
+Histoire de la démographie française : [Wikipedia](https://fr.wikipedia.org/wiki/Histoire_d%C3%A9mographique_de_la_France "Histoire de la démographie française")
+
+La démographie parisienne : [wikipedia](https://fr.wikipedia.org/wiki/D%C3%A9mographie_de_Paris)
